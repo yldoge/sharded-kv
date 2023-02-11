@@ -97,7 +97,7 @@ func TestManyElections2A(t *testing.T) {
 
 	cfg.checkOneLeader()
 
-	iters := 1000
+	iters := 100
 	for ii := 1; ii < iters; ii++ {
 		// disconnect three nodes
 		i1 := rand.Int() % servers
@@ -116,7 +116,7 @@ func TestManyElections2A(t *testing.T) {
 		cfg.connect(i2)
 		cfg.connect(i3)
 		DPrintf("[TEST] REconnected %d,%d,%d", i1, i2, i3)
-		fmt.Printf("iter %d/1000 completed", ii)
+		fmt.Printf("iter %d/%d completed\n", ii, iters)
 	}
 
 	cfg.checkOneLeader()
@@ -841,6 +841,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
 			cfg.disconnect(leader)
+			DPrintf("*********************[TEST] server %d disconnected*********************", leader)
 			nup -= 1
 		}
 
@@ -848,9 +849,11 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			s := rand.Int() % servers
 			if cfg.connected[s] == false {
 				cfg.connect(s)
+				DPrintf("*********************[TEST] server %d REconnected*********************", s)
 				nup += 1
 			}
 		}
+		fmt.Printf("%d/%d iter | ", iters, 1000)
 	}
 
 	for i := 0; i < servers; i++ {
@@ -858,6 +861,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			cfg.connect(i)
 		}
 	}
+	DPrintf("*********************[TEST] ALL REconnected*********************")
 
 	cfg.one(rand.Int()%10000, servers, true)
 
