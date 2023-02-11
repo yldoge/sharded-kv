@@ -93,8 +93,8 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
-	// dependency injected
-	applyCh chan ApplyMsg
+	applyCh   chan ApplyMsg
+	applyCond *sync.Cond
 
 	electionTimer  *time.Timer
 	heartbeatTimer *time.Timer
@@ -245,11 +245,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.log = append(rf.log, args.Entries...)
 
 	if args.LeaderCommit > rf.commitIndex {
-		if args.LeaderCommit < len(rf.log)-1 {
-			rf.commit(args.LeaderCommit)
-		} else {
-			rf.commit(len(rf.log) - 1)
-		}
+		rf.commit(Min(args.LeaderCommit, len(rf.log)-1))
 	}
 	reply.Success = true
 }
@@ -571,14 +567,33 @@ func (rf *Raft) heartbeat(fw int) {
 
 func (rf *Raft) commit(N int) {
 	rf.commitIndex = N
-	for rf.commitIndex > rf.lastApplied {
-		rf.lastApplied++
-		rf.applyCh <- ApplyMsg{
-			CommandValid: true,
-			Command:      rf.log[rf.lastApplied].Command,
-			CommandIndex: rf.lastApplied,
+	rf.applyCond.Broadcast()
+}
+
+func (rf *Raft) applier() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		for rf.commitIndex <= rf.lastApplied {
+			rf.applyCond.Wait()
 		}
+		ci := rf.commitIndex
+		la := rf.lastApplied
+		entries := make([]LogEntry, ci-la)
+		copy(entries, rf.log[la+1:ci+1])
+		rf.mu.Unlock()
+		for i, entry := range entries {
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      entry.Command,
+				CommandIndex: la + 1 + i,
+			}
+		}
+		rf.mu.Lock()
+		DPrintf("[Server %d]applied log %d - %d", rf.me, la+1, ci)
+		rf.lastApplied = Max(rf.lastApplied, ci)
+		rf.mu.Unlock()
 	}
+
 }
 
 func (rf *Raft) toFollower(newTerm int) {
@@ -632,6 +647,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.applyCh = applyCh
+	rf.applyCond = sync.NewCond(&rf.mu)
 	rf.electionTimer = time.NewTimer(RandElectionTimeout())
 	rf.heartbeatTimer = time.NewTimer(HeartbeatTimeout())
 
@@ -640,6 +656,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	go rf.applier()
 
 	DPrintf("[Make][%d] Initialized.", rf.me)
 	return rf
@@ -651,4 +669,20 @@ func RandElectionTimeout() time.Duration {
 
 func HeartbeatTimeout() time.Duration {
 	return time.Duration(HEARTBEATS_TIMEOUT) * time.Millisecond
+}
+
+func Max(a, b int) int {
+	if a > b {
+		return a
+	} else {
+		return b
+	}
+}
+
+func Min(a, b int) int {
+	if a > b {
+		return b
+	} else {
+		return a
+	}
 }
