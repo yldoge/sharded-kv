@@ -81,9 +81,9 @@ type Raft struct {
 	role int // server role
 
 	// Persistent state
-	currentTerm int        // latest term server has seen
-	votedFor    int        // candidatedID that received vote in current term
-	log         []LogEntry // log entries
+	currentTerm int // latest term server has seen
+	votedFor    int // candidatedID that received vote in current term
+	log         Log
 
 	// Volatile state
 	commitIndex int
@@ -130,7 +130,7 @@ func (rf *Raft) persist() {
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
+	e.Encode(rf.log.getLog())
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -145,13 +145,13 @@ func (rf *Raft) readPersist(data []byte) {
 	d := labgob.NewDecoder(r)
 	var currentTerm int
 	var votedFor int
-	var logs []LogEntry
+	var logs []Entry
 	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
 		log.Fatal("Error readPersist on server", rf.me)
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
-		rf.log = logs
+		rf.log.setLog(logs)
 	}
 }
 
@@ -173,20 +173,88 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-// LogEntry is the log entry structure.
-type LogEntry struct {
+type Entry struct {
 	Command interface{}
 	Term    int
 }
 
+type Log struct {
+	log    []Entry
+	index0 int
+}
+
+func NewLog() Log {
+	return Log{make([]Entry, 1), 0}
+}
+
+// trimFront trim log entries from head through i, keep i + 1 to the end
+func (l *Log) trimFront(index int) {
+	l.log = l.log[index-l.index0+1:]
+	l.index0 = index + 1
+}
+
+// trimEnd trim log entries from i (includes i) to the end
+func (l *Log) trimEnd(index int) {
+	l.log = l.log[:index-l.index0]
+}
+
+func (l *Log) get(index int) Entry {
+	return l.log[index-l.index0]
+}
+
+func (l *Log) getTermAt(index int) int {
+	return l.log[index-l.index0].Term
+}
+
+// [s, e)
+func (l *Log) slice(s, e int) []Entry {
+	return l.log[s-l.index0 : e-l.index0]
+}
+
+func (l *Log) getLast() Entry {
+	return l.log[len(l.log)-1]
+}
+
+func (l *Log) getLastIndex() int {
+	return l.index0 + len(l.log) - 1
+}
+
+func (l *Log) getLastTerm() int {
+	return l.log[len(l.log)-1].Term
+}
+
+func (l *Log) getStartIndex() int {
+	return l.index0
+}
+
+func (l *Log) getLog() []Entry {
+	return l.log
+}
+
+func (l *Log) setLog(log []Entry) {
+	l.log = log
+}
+
+func (l *Log) length() int {
+	return len(l.log) + l.index0
+}
+
+func (l *Log) append(entries []Entry) {
+	l.log = append(l.log, entries...)
+}
+
+func (l *Log) appendOne(e Entry) {
+	l.log = append(l.log, e)
+}
+
 // AppendEntries RPC arguments structure.
 type AppendEntriesArgs struct {
-	Term         int        // leader's term
-	LeaderId     int        // so follower can redirect clients
-	PrevLogIndex int        // index of log entry immediately preceding new ones
-	PrevLogTerm  int        // term of PrevLogIndex entry
-	Entries      []LogEntry // log entries to store
-	LeaderCommit int        // leader's commitIndex
+	Term         int     // leader's term
+	LeaderId     int     // so follower can redirect clients
+	PrevLogIndex int     // index of log entry immediately preceding new ones
+	PrevLogTerm  int     // term of PrevLogIndex entry
+	Entries      []Entry // log entries to store
+	LeaderCommit int     // leader's commitIndex
 }
 
 // AppendEntries RPC reply structure.
@@ -217,8 +285,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// Reply false if log doesn’t contain an entry at prevLogIndex
 	// whose term matches prevLogTerm
-	if len(rf.log)-1 < args.PrevLogIndex {
-		reply.ConfilictIndex = len(rf.log)
+	if rf.log.getLastIndex() < args.PrevLogIndex {
+		reply.ConfilictIndex = rf.log.length()
 		reply.ConflictTerm = -1
 		reply.Success = false
 		DPrintf("[AE][server %d][leader %d] NO [PrevIndex %d]", rf.me, args.LeaderId, args.PrevLogIndex)
@@ -226,10 +294,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// have prevLogIndex, but the term does not match
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
-		ci := 1
-		for rf.log[ci].Term < reply.ConflictTerm {
+	if rf.log.getTermAt(args.PrevLogIndex) != args.PrevLogTerm {
+		reply.ConflictTerm = rf.log.getTermAt(args.PrevLogIndex)
+		ci := rf.log.getStartIndex()
+		for rf.log.getTermAt(ci) < reply.ConflictTerm {
 			ci++
 		}
 		reply.ConfilictIndex = ci
@@ -239,13 +307,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// update log
-	if len(rf.log)-1 > args.PrevLogIndex {
-		rf.log = rf.log[:args.PrevLogIndex+1]
+	if rf.log.getLastIndex() > args.PrevLogIndex {
+		rf.log.trimEnd(args.PrevLogIndex + 1)
 	}
-	rf.log = append(rf.log, args.Entries...)
+	rf.log.append(args.Entries)
 
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commit(Min(args.LeaderCommit, len(rf.log)-1))
+		rf.commit(Min(args.LeaderCommit, rf.log.getLastIndex()))
 	}
 	reply.Success = true
 }
@@ -298,13 +366,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.toFollower(args.Term)
 	}
 
-	if rf.log[len(rf.log)-1].Term > args.LastLogTerm {
-		DPrintf("[RV][server %d] higher last term: %d vs. %d", rf.me, rf.log[len(rf.log)-1].Term, args.LastLogTerm)
+	if rf.log.getLastTerm() > args.LastLogTerm {
+		DPrintf("[RV][server %d] higher last term: %d vs. %d", rf.me, rf.log.getLastTerm(), args.LastLogTerm)
 		return
 	}
 
-	if rf.log[len(rf.log)-1].Term == args.LastLogTerm && len(rf.log) > args.LastLogIndex+1 {
-		DPrintf("[RV][server %d] longer: %d vs. %d", rf.me, len(rf.log), args.LastLogIndex+1)
+	if rf.log.getLastTerm() == args.LastLogTerm && rf.log.length() > args.LastLogIndex+1 {
+		DPrintf("[RV][server %d] longer: %d vs. %d", rf.me, rf.log.length(), args.LastLogIndex+1)
 		return
 	}
 
@@ -372,13 +440,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term = rf.currentTerm
 
 	if isLeader {
-		newLog := LogEntry{
+		newLog := Entry{
 			Term:    rf.currentTerm,
 			Command: command,
 		}
-		rf.log = append(rf.log, newLog)
+		rf.log.appendOne(newLog)
 		rf.persist()
-		index = len(rf.log) - 1
+		index = rf.log.getLastIndex()
 		rf.matchIndex[rf.me] = index
 		rf.nextIndex[rf.me] = index + 1
 	}
@@ -434,8 +502,8 @@ func (rf *Raft) elect() {
 	args := RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
-		LastLogIndex: len(rf.log) - 1,
-		LastLogTerm:  rf.log[len(rf.log)-1].Term,
+		LastLogIndex: rf.log.getLastIndex(),
+		LastLogTerm:  rf.log.getLastTerm(),
 	}
 	rf.mu.Unlock()
 
@@ -502,14 +570,19 @@ func (rf *Raft) heartbeat(fw int) {
 	rf.mu.Lock()
 	ni := rf.nextIndex[fw]
 	pi := ni - 1
-	// deep copy
-	entries := make([]LogEntry, len(rf.log[ni:]))
-	copy(entries, rf.log[ni:])
+	li := rf.log.getLastIndex()
+	var entries []Entry
+	if li >= ni {
+		entries = make([]Entry, li-ni+1)
+		copy(entries, rf.log.slice(ni, li+1))
+	} else {
+		entries = []Entry{}
+	}
 	args := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: pi,
-		PrevLogTerm:  rf.log[pi].Term,
+		PrevLogTerm:  rf.log.getTermAt(pi),
 		Entries:      entries,
 		LeaderCommit: rf.commitIndex,
 	}
@@ -529,14 +602,14 @@ func (rf *Raft) heartbeat(fw int) {
 			rf.matchIndex[fw] = args.PrevLogIndex + len(args.Entries)
 			rf.nextIndex[fw] = rf.matchIndex[fw] + 1
 
-			for N := len(rf.log) - 1; N > rf.commitIndex; N-- {
+			for N := rf.log.getLastIndex(); N > rf.commitIndex; N-- {
 				cnt := 0
 				for _, mi := range rf.matchIndex {
 					if mi >= N {
 						cnt++
 					}
 				}
-				if cnt*2 > len(rf.peers) && rf.log[N].Term == rf.currentTerm {
+				if cnt*2 > len(rf.peers) && rf.log.getTermAt(N) == rf.currentTerm {
 					rf.commit(N)
 					break
 				}
@@ -550,11 +623,12 @@ func (rf *Raft) heartbeat(fw int) {
 			} else {
 				// fail because log inconsistency (accerlerated log backtracking)
 				// should first find the conflict term
-				i := len(rf.log) - 1
-				for i > 0 && rf.log[i].Term != reply.ConflictTerm {
+				i := rf.log.getLastIndex()
+				s := rf.log.getStartIndex()
+				for i >= s && rf.log.getTermAt(i) != reply.ConflictTerm {
 					i--
 				}
-				if i > 0 {
+				if i >= s {
 					// found
 					rf.nextIndex[fw] = i + 1
 				} else {
@@ -578,8 +652,8 @@ func (rf *Raft) applier() {
 		}
 		ci := rf.commitIndex
 		la := rf.lastApplied
-		entries := make([]LogEntry, ci-la)
-		copy(entries, rf.log[la+1:ci+1])
+		entries := make([]Entry, ci-la)
+		copy(entries, rf.log.slice(la+1, ci+1))
 		rf.mu.Unlock()
 		for i, entry := range entries {
 			rf.applyCh <- ApplyMsg{
@@ -618,8 +692,8 @@ func (rf *Raft) toLeader() {
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	for i := range rf.peers {
-		rf.nextIndex[i] = len(rf.log)
-		rf.matchIndex[i] = 0
+		rf.nextIndex[i] = rf.log.getLastIndex() + 1 // initialized to leader last log index + 1
+		rf.matchIndex[i] = 0                        // initialized to 0, increases monotonically
 	}
 }
 
@@ -643,7 +717,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = follower
 	rf.currentTerm = 0 // initialized to 0 on first boot, increases monotonically
 	rf.votedFor = -1   // -1 is null
-	rf.log = []LogEntry{{Term: 0, Command: -1}}
+	rf.log = NewLog()
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.applyCh = applyCh
