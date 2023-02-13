@@ -93,6 +93,11 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
+	// snapshot
+	snapshot      []byte
+	snapshotIndex int
+	snapshotTerm  int
+
 	applyCh   chan ApplyMsg
 	applyCond *sync.Cond
 
@@ -135,6 +140,20 @@ func (rf *Raft) persist() {
 	rf.persister.SaveRaftState(data)
 }
 
+func (rf *Raft) persistSnapshotL() {
+	state := rf.getCurrentStateL()
+	rf.persister.SaveStateAndSnapshot(state, rf.snapshot)
+}
+
+func (rf *Raft) getCurrentStateL() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log.getLog())
+	return w.Bytes()
+}
+
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
@@ -158,8 +177,19 @@ func (rf *Raft) readPersist(data []byte) {
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
 	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if lastIncludedIndex <= rf.commitIndex {
+		return false
+	}
+
+	rf.snapshot = Clone(snapshot)
+	rf.snapshotIndex = lastIncludedIndex
+	rf.snapshotTerm = lastIncludedTerm
+	rf.persistSnapshotL()
+	rf.log.trimFront(lastIncludedIndex)
 
 	return true
 }
@@ -170,7 +200,54 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	rf.mu.Lock()
+	rf.snapshot = Clone(snapshot)
+	rf.snapshotIndex = index
+	rf.snapshotTerm = rf.log.getTermAt(index)
+	rf.persistSnapshotL()
+	rf.log.trimFront(index)
+	rf.mu.Unlock()
+}
 
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+// InstallSnapshot RPC handler
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist()
+	reply.Term = rf.currentTerm
+
+	if args.Term < rf.currentTerm {
+		return
+	}
+
+	// ISS is from the current leader
+	rf.toFollower(args.Term)
+	rf.electionTimer.Reset(RandElectionTimeout())
+
+	if args.LastIncludedIndex <= rf.commitIndex {
+		return
+	}
+
+	go func() {
+		rf.applyCh <- ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      args.Data,
+			SnapshotIndex: args.LastIncludedIndex,
+			SnapshotTerm:  args.LastIncludedTerm,
+		}
+	}()
 }
 
 type Entry struct {
@@ -759,4 +836,10 @@ func Min(a, b int) int {
 	} else {
 		return a
 	}
+}
+
+func Clone(orig []byte) []byte {
+	x := make([]byte, len(orig))
+	copy(x, orig)
+	return x
 }
