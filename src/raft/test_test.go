@@ -106,7 +106,7 @@ func TestManyElections2A(t *testing.T) {
 		cfg.disconnect(i1)
 		cfg.disconnect(i2)
 		cfg.disconnect(i3)
-		DPrintf("[TEST] Disconnected %d,%d,%d", i1, i2, i3)
+		DPrintf(dTest, "Disconnected %d,%d,%d", i1, i2, i3)
 
 		// either the current leader should still be alive,
 		// or the remaining four should elect a new one.
@@ -115,7 +115,7 @@ func TestManyElections2A(t *testing.T) {
 		cfg.connect(i1)
 		cfg.connect(i2)
 		cfg.connect(i3)
-		DPrintf("[TEST] REconnected %d,%d,%d", i1, i2, i3)
+		DPrintf(dTest, "REconnected %d,%d,%d", i1, i2, i3)
 		fmt.Printf("iter %d/%d completed\n", ii, iters)
 	}
 
@@ -377,7 +377,7 @@ func TestRejoin2B(t *testing.T) {
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
-	DPrintf("***********************[WARNING][server %d] Disconnected.***********************", leader1)
+	DPrintf(dTest, "***********************[WARNING][server %d] Disconnected.***********************", leader1)
 
 	// make old leader try to agree on some entries
 	cfg.rafts[leader1].Start(102)
@@ -389,17 +389,17 @@ func TestRejoin2B(t *testing.T) {
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
-	DPrintf("***********************[WARNING][server %d] Disconnected.***********************", leader2)
+	DPrintf(dTest, "***********************[WARNING][server %d] Disconnected.***********************", leader2)
 
 	// old leader connected again
 	cfg.connect(leader1)
-	DPrintf("***********************[WARNING][server %d] REconnected.***********************", leader1)
+	DPrintf(dTest, "***********************[WARNING][server %d] REconnected.***********************", leader1)
 
 	cfg.one(104, 2, true)
 
 	// all together now
 	cfg.connect(leader2)
-	DPrintf("***********************[WARNING][server %d] REconnected.***********************", leader2)
+	DPrintf(dTest, "***********************[WARNING][server %d] REconnected.***********************", leader2)
 
 	cfg.one(105, servers, true)
 
@@ -656,6 +656,7 @@ func TestPersist22C(t *testing.T) {
 
 		cfg.disconnect((leader1 + 1) % servers)
 		cfg.disconnect((leader1 + 2) % servers)
+		DPrintf(dTest, "%d, %d Disconnected", (leader1+1)%servers, (leader1+2)%servers)
 
 		cfg.one(10+index, servers-2, true)
 		index++
@@ -663,22 +664,26 @@ func TestPersist22C(t *testing.T) {
 		cfg.disconnect((leader1 + 0) % servers)
 		cfg.disconnect((leader1 + 3) % servers)
 		cfg.disconnect((leader1 + 4) % servers)
+		DPrintf(dTest, "%d, %d, %d Disconnected", (leader1+0)%servers, (leader1+3)%servers, (leader1+4)%servers)
 
 		cfg.start1((leader1+1)%servers, cfg.applier)
 		cfg.start1((leader1+2)%servers, cfg.applier)
 		cfg.connect((leader1 + 1) % servers)
 		cfg.connect((leader1 + 2) % servers)
+		DPrintf(dTest, "%d, %d Restarted and REconnected", (leader1+1)%servers, (leader1+2)%servers)
 
 		time.Sleep(RaftElectionTimeout)
 
 		cfg.start1((leader1+3)%servers, cfg.applier)
 		cfg.connect((leader1 + 3) % servers)
+		DPrintf(dTest, "%d Restarted and REconnected", (leader1+3)%servers)
 
 		cfg.one(10+index, servers-2, true)
 		index++
 
 		cfg.connect((leader1 + 4) % servers)
 		cfg.connect((leader1 + 0) % servers)
+		DPrintf(dTest, "%d, %d REconnected", (leader1+0)%servers, (leader1+4)%servers)
 	}
 
 	cfg.one(1000, servers, true)
@@ -841,7 +846,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
 			cfg.disconnect(leader)
-			DPrintf("*********************[TEST] server %d disconnected*********************", leader)
+			DPrintf(dTest, "*********************[TEST] server %d disconnected*********************", leader)
 			nup -= 1
 		}
 
@@ -849,7 +854,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			s := rand.Int() % servers
 			if cfg.connected[s] == false {
 				cfg.connect(s)
-				DPrintf("*********************[TEST] server %d REconnected*********************", s)
+				DPrintf(dTest, "*********************[TEST] server %d REconnected*********************", s)
 				nup += 1
 			}
 		}
@@ -861,7 +866,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			cfg.connect(i)
 		}
 	}
-	DPrintf("*********************[TEST] ALL REconnected*********************")
+	DPrintf(dTest, "*********************[TEST] ALL REconnected*********************")
 
 	cfg.one(rand.Int()%10000, servers, true)
 
@@ -1043,10 +1048,12 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		}
 
 		if disconnect {
+			DPrintf(dTest, "S%d disconnected", victim)
 			cfg.disconnect(victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
 		if crash {
+			DPrintf(dTest, "S%d crashed", victim)
 			cfg.crash1(victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
@@ -1063,16 +1070,19 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		if disconnect {
 			// reconnect a follower, who maybe behind and
 			// needs to rceive a snapshot to catch up.
+			DPrintf(dTest, "S%d Reconnected", victim)
 			cfg.connect(victim)
 			cfg.one(rand.Int(), servers, true)
 			leader1 = cfg.checkOneLeader()
 		}
 		if crash {
+			DPrintf(dTest, "S%d alive and reconnected", victim)
 			cfg.start1(victim, cfg.applierSnap)
 			cfg.connect(victim)
 			cfg.one(rand.Int(), servers, true)
 			leader1 = cfg.checkOneLeader()
 		}
+		fmt.Printf("%d/%d | ", i, iters)
 	}
 	cfg.end()
 }
